@@ -1,0 +1,735 @@
+---
+title: "Movie Recommendation System: Movielens Database"
+author: "Mahdi Karami"
+date: "2023-01-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1- Introduction
+
+The present report aims to develop a movie recommendation system based on the MovieLens database of over 10M ratings given by numerous individuals to a large set of movies. A movie recommendation system is a technology that uses machine learning algorithms to suggest films to users based on their ratings and preferences. These systems analyze user behavior, preferences, and their rating history, as well as information about the movies themselves, to generate personalized recommendations. The goal of such a system is to help users discover new films they will enjoy and to make the process of finding something to watch more efficient by taking into account the users' ratings of movies. This allows the recommendation system to understand the user's taste and suggest similar movies accordingly. The linear model with regularization is implemented in R programming language to predict the users' ratings that would be given to the movies by considering the history of other ratings.
+
+# 2- Data Wrangling & Preparation
+
+The MovieLens rating database is located on their website (mentioned in the R script) which should be downloaded first by the R script. The downloaded zip-file contains two separate files, one for ratings ("ratings.dat") and another file representing the information about all the movies. The whole information are extracted and stored in a unique data frame called "movielens". The mentioned data frame is then divided into two separated groups, namely "edx" and "final_holdout_test" (by respectively portions of 90% to 10%), where the former is engaged to build the predicting model while the latter is meant for testing the predicting model and kept untouched until the model is finalized.
+
+```{r, include=FALSE}
+# Install required package if not installed:
+if(!require(tidyverse)) install.packages("tidyverse", 
+                                         repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", 
+                                     repos = "http://cran.us.r-project.org")
+
+#Load requierd libraries:
+library(tidyverse)
+library(caret)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+# Download the zipped file if it does not exist in the working directory:
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+
+# Unzip the rating and movies files if they do not exist:----------------------
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+# -----------------------------------------------------------------------------
+
+
+# Extract data from ratings_file and store them into a data frame:
+ratings <- as.data.frame(str_split(read_lines(ratings_file), 
+                                   fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+
+# Add columns names to ratings data frame:
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+
+# Extract data from movies file and store them into a data frame:
+movies <- as.data.frame(str_split(read_lines(movies_file), 
+                                  fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+
+# Add columns names to ratings data frame:
+colnames(movies) <- c("movieId", "title", "genres")
+
+# convert movieId column from string to integer:
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+# Combine ratings and movies into a new data frame: movielens
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") 
+
+test_index <- createDataPartition(y = movielens$rating, 
+                                  times = 1, p = 0.1, list = FALSE)
+
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into 'edx' set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+```
+
+The "edx" dataset is consequently split into two further parts, namely "train_set" (90%) and "validation_set" (10%). They will be used for building models and optimize the hyper-parameters, respectively. This section is titled as "Part #1" in the provided R script.
+
+```{r, include=FALSE}
+# Divide 'edx' into train_set & 'validation_set' 
+validation_index <- createDataPartition(y = edx$rating, 
+                                        times = 1, p = 0.1, list = FALSE)
+
+
+train_set <- edx[-validation_index,]
+temp <- edx[validation_index,]
+
+# Make sure userId and movieId in 'validation_set' are also in 'train_set'
+validation_set <- temp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from validation set back into train set
+removed <- anti_join(temp, validation_set)
+train_set <- rbind(train_set, removed)
+
+
+# Keep required variables in memory and delete the rest of them:
+rm(list = ls()[!(ls() %in% 
+          c('edx','final_holdout_test', 'train_set', 'validation_set'))])
+```
+
+# 3- Database Inspection
+
+The given database is inspected in this section. It should be mentioned that we only investigate the "edx" set, i.e., the available dataset for building the model, as we are not allowed to touch the test set until finalizing the predicting model. In the other word, we assume that there is no information of the test set in this stage.
+
+## 3-1- Overview of the MovieLens Database
+
+The MovieLens dataset contains the history of over 10M ratings given by multiple users. The overall information of the generated datasets are shown in table below. There are 6 columns in the data frames indicating user's ID, movie ID, the given rating, time-stamp, movie title, and the movies genres.The time-stamp is an integer indicating the time-date that the rating has been given to the movie in terms of seconds since January 1, 1970.
+
+```{r, include=FALSE}
+# Show the number of rows in each dataset:
+n_train <- print(nrow(train_set))
+n_validation <- print(nrow(validation_set))
+n_test <- print(nrow(final_holdout_test))
+nTotal <- n_train + n_validation + n_test 
+nList <- c(n_train,n_validation,n_test, nTotal)
+nNames <- c("Train Set", "Validation Set", "Test Set", "Total (MovieLens)")
+dataframeOverView <- data.frame(nNames, nList, rep(ncol(edx),4))
+colnames(dataframeOverView) <- c("Data Frame", "No. Rows", "No. Columns")
+head(dataframeOverView)
+names(edx)
+```
+
+```{r OverviewOfDataframes, echo = FALSE, result='asis'}
+
+knitr::kable(dataframeOverView, caption = "Overview of Data Frames")
+```
+
+## 3-2- Movies
+
+There are totally 10,677 individual movies identified by unique Movie IDs in the "edx" database. The number of ratings each movie received varies considerably in the dataset, ranging from only 1 rating (for more than 100 movies) to 31,362 rating received by "Pulp Fiction" (movieID = 296). The average and median of the number of ratings for each movie are respectively \~843 and 122.
+
+```{r, include=FALSE}
+movies <- edx %>% group_by(movieId, title, genres) %>% dplyr::summarize( nRatings = n())
+nMovies <- nrow(movies)
+
+minMovieRatings <- min(movies$nRatings)
+maxMovieRating <- max(movies$nRatings)
+
+sum(movies$nRatings == minMovieRatings)
+sum(movies$nRatings == maxMovieRating)
+
+movies %>% filter(nRatings == maxMovieRating ) %>% pull(movieId)
+movies %>% filter(nRatings == maxMovieRating ) %>% pull(title)
+
+mean(movies$nRatings)
+median(movies$nRatings)
+```
+
+The distribution of received rating by each movie is depicted as a histogram in figure below where the horizontal axis is shown in log-scale. For instance, one can check the number of movies received only one rating (126).
+
+```{r moviesRatingHist, echo=FALSE}
+movies %>% 
+  ggplot(aes(nRatings)) + 
+  geom_histogram( bins=50, color = "blue") +
+  scale_x_log10() + 
+  ggtitle("Distribtution of the Number of Ratings Received by Movies") +
+  xlab("Number of Ratings Received by a Movie") +
+  ylab("Number of Movies")
+```
+
+## 3-3- Users
+
+there are 69,878 unique users in the rating database with the minimum and maximum of respectively 10 and 6,616 number of ratings for each user. The average and median of the number of ratings given by each user are \~129 and 62, respectively.
+
+```{r, include=FALSE}
+users <- edx %>% group_by(userId) %>% dplyr::summarize( nRatings = n())
+nUsers <- nrow(users)
+nUsers
+
+minUserRatings <- min(users$nRatings)
+minUserRatings
+
+maxUserRating <- max(users$nRatings)
+maxUserRating
+
+sum(users$nRatings == minUserRatings)
+sum(users$nRatings == maxUserRating)
+
+
+mean(users$nRatings)
+median(users$nRatings)
+```
+
+the distribution of the number of ratings among the users is demonstrated in figure below.
+
+```{r userRatingHist, echo=FALSE}
+users %>% 
+  ggplot(aes(nRatings)) + 
+  geom_histogram( bins=50, color = "blue") +
+  scale_x_log10() + 
+  ggtitle("Distribtution of the Number of Ratings given by Users") +
+  xlab("Number of Ratings Given by a User") +
+  ylab("Number of Users")
+```
+
+## 3-4- Ratings
+
+The ratings are discrete values ranging from 0.5 to 5 with the intervals of 0.5. The average, median, and standard deviation of the ratings in "edx" database are 3.51, 4, and 1.06, respectively. Figure below depicts the distribution of ratings given to all the movies. One can see users are more likely to give integer ratings (1,2,) comparing to half ones(0.5,1.5,...)!
+
+```{r, include=FALSE }
+mean(edx$rating)
+median(edx$rating)
+sd(edx$rating)
+```
+
+```{r ratingDistribution, echo=FALSE}
+edx %>% group_by(rating) %>% 
+  summarize(n=n()) %>% 
+  ggplot(aes(x=rating, y=n)) +
+  geom_bar(stat="identity", fill="blue") +
+  ggtitle("Distribtution of Ratings in Database") +
+  xlab("Rating") +
+  ylab("Number of Ratings")
+```
+
+## 3-5- Genres
+
+The genre attribute of the "edx" database is a text containing corresponding genres which are separated by "\|" character. There are 19 basic genres whose combinations generate 797 different genres in the database. There are also 7 ratings given to "Pull My Daisy (1958)" which is a movie indicated as "(no genres listed)".
+
+```{r, include=FALSE}
+# Number of different genres (Combinations of basic genres)
+nrow(edx %>% group_by(genres) %>% summarize(n=n()))
+
+# option #1: Run the follwoing script to get the list of genres--------------
+# genresCol <- edx$genres
+# genreSet <- c()
+# 
+# 
+# for (iRow in 1:length(genresCol)) {
+#   splitted <- unlist(strsplit(as.character(genresCol[iRow]),"\\|"))
+#   for (iSplitted in 1:length(splitted)) {
+#     genreSet <- append(genreSet, splitted[iSplitted])
+#   }
+#   genreSet <- unique(genreSet)
+# }
+# genreSet <- sort(genreSet)
+#---------------------------------------------------------------------------
+
+# option #2: Use the pre-found genres to save the runtime;
+genreSet <- c( "(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "IMAX", "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western" )
+
+genreMoviesCount <- rep(0, length(genreSet))
+genreRatingCount <- rep(0, length(genreSet))
+
+for (iGenre in 1:length(genreSet)) {
+  genreMoviesCount[iGenre] <- nrow(movies %>%
+                              filter(str_detect(genres, genreSet[iGenre])))
+  
+  genreRatingCount[iGenre] <- nrow(edx %>%
+                              filter(str_detect(genres, genreSet[iGenre])))
+}
+  
+  
+names(genreMoviesCount) <- genreSet
+names(genreRatingCount) <- genreSet
+
+genreMoviesCount <- sort(genreMoviesCount, decreasing = T)
+genreRatingCount <- sort(genreRatingCount, decreasing = T)
+```
+
+The figure below depicts the number of movies corresponding to each basic genres in the database. It should be mentioned that a movie can be found in multiple genres, hence the summation of movies in the plot exceeds the total number of movies in the database.
+
+```{r genreNumberOfMovies, echo = FALSE}
+# Plot margins from 4 sides:
+par(mar = c(8, 5, 0, 0)) 
+
+# X-Axis margins:
+par(mgp = c(4, 0.5, 0))
+barplot(genreMoviesCount, names.arg = names(genreMoviesCount), xlab = "Basic Genres", ylab = "Number of Movies", las = 2, col="blue")
+```
+
+Another graph is shown below representing the number of ratings for each basic genres in the database. Similar to the above plot, each rating may be considered for multiple genres. One can see a similar pattern in two figures, despite of some differences. The most popular genre in the movies (and also in the ratings) is Dramma, which is followed by Comedy. 
+
+```{r genreNumberOfRatings, echo = FALSE}
+# Plot margins from 4 sides:
+par(mar = c(8, 5, 0, 0)) 
+
+# X-Axis margins:
+par(mgp = c(4, 0.5, 0))
+
+barplot(genreRatingCount, names.arg = names(genreRatingCount), xlab = "Basic Genres", ylab = "Number of Ratings", las = 2, col="blue")
+
+
+```
+
+# 4- Methodology
+
+The methodology of the proposed movie recommendation system is illustated in this section.
+
+## 4-1- Linear Model
+
+The linear estimation is considered for predicting users' ratings to the movies in the database. The following formula is assumed for calculating the ratings.
+
+$$
+\hat{R}_{u,i}=\mu + B_i + B_u + B_g + \epsilon_{i,u,g}
+$$
+
+where $\hat{R}_{u,i}$ indicates the estimated rating to movie $i$ by user $u$ and the average rating is indicated by $\mu$. Due to the differences among movies, we apply a bias term ($B_i$) which implies the overall tendency of all the users toward movie $i$. The differences among individual movies are taken into account by bias effect, which indicates the tendency of all users to rate a special movie $i$ differently from the others, which is shown in above formula by $B_i$. There is also another bias coefficient for each user, $B_u$, which models the differences in users' behavior when rating movies. The last bias term ($B_g$) indicates the effect of genres on the ratings. The error of estimation is considered by term $\epsilon_{i,u,g}$ which is assumed to have a normal distribution and will be minimized by linear model.considering $R_{u,i}$ as the actual ratings in the database, the terms of the linear model can be calculated by the following equations.
+
+$$ 
+\mu = AVG(R)
+$$ $$
+B_i = \frac{1}{N_i}\sum_{u = 1}^{N_i}{(R_{u,i} - \mu)}
+$$ where for each movie $i$, $N_i$ indicates the number of ratings given by the users. The users' bias term can also be calculated as following.
+
+$$
+B_u = \frac{1}{N_u}\sum_{u = 1}^{N_u}{(R_{u,i} - \mu - B_i)}
+$$ where $N_u$ demonstrates the number of ratings given by user $u$. Accordingly, the genre bias would be found by the following equation.
+
+$$
+B_g = \frac{1}{N_t}\sum_{u = 1}^{N_t}{(R_{u,i} - \mu - B_i - B_u)}
+$$ where $N_t$ indicates the total number of ratings existing in the database.
+
+## 4-2- Regularization
+
+The regularization technique allow us to penalize data over-fitting of the training set by introducing the regularization parameter, $\lambda$ to the linear model. The extra parameter(s) entered into the model should be optimized by neither training nor testing sets. Hence, a new set of data should be used to tune these hyper-parameters, where the validation set is taken into account. To make the problem done, we divide the whole dataset into 3 parts, namely train, validation, and test sets. the train set is used to build linear model on while we use the validation set for fine-tuning the hyper-parameters (here $\lambda$) to perform regularization and minimize the over-fitting issue. The test set will be used for evaluating the final model then. The following regularization equations are used in the current report although various formulations can be used for this purpose generally.
+
+$$
+B_i = \frac{1}{N_i+\lambda}\sum_{u = 1}^{N_i}{(R_{u,i} - \mu)}
+$$
+
+$$
+B_u = \frac{1}{N_u+\lambda}\sum_{u = 1}^{N_u}{(R_{u,i} - \mu - B_i)}
+$$
+
+$$
+B_g = \frac{1}{N_t+\lambda}\sum_{u = 1}^{N_t}{(R_{u,i} - \mu - B_i - B_u)}
+$$
+
+## 4-3- Functions Description
+
+For better implementation of the linear model, the script is developed in a procedural format. There are 5 functions in the R script (Part #3) which are described here.
+
+### A- Building the model
+
+The linear model is built by *buildLinearModel*($DB_{in}$ , $\lambda$) which takes a database and a regularization value to build a linear model on. The input database can be either the train set or "edx". The default set of the function is $\lambda=0$ which indicates to regularization. The output of the function is a list containing $\mu$, $B_i$, $B_u$ , and $B_g$.
+
+### B- Predicting the user rating of a given dataset with a given model
+
+The prediction of a given database with the given model is done by using \*doPredictionWithModel($DB_{in}$, $Model_{in}$, $option$) function. The format of the given model should be the same as the output of *buildLinearModel*($DB_{in}$ , $\lambda$) function. The output would be a list containing predicted ratings with the same size as that of the input database. The $option$ argument defines the level of details used for calculation, describe below. 
+*option =1: $\mu$
+*option =2: $\mu$, $B_i$ 
+*option =3: $\mu$, $B_i$, $B_m$ 
+*option =4,5: $\mu$, $B_i$, $B_m$, $B_g$
+
+The values of 4 and 5 for $option$ result in the same results in this function. the latter value however indicates the case that regularization is taken into account.
+
+### C- Calculating RMSE for a predicted set of result
+
+The root-mean-square error (RMSE) of a predicted rating list is calculated by comparing it with the actual rating using *calcRMSE*($R$, $\hat{R}$) where the arguments indicate the actual and predicted ratings, respectively. Both input arguments should be entered with list/vector type. The output is a real number indicating the RMSE of the prediction.
+
+### D- Calculating RMSE for a given database with a given pre-built model
+
+The function *calcPredictionError*($DB_{in}$, $Model_{in}$, $option$) takes a given database and a pre-built model as inputs. It first calculates the predicted rating through *doPredictionWithModel*($DB_{in}$, $Model_{in}$, $option$), and consequently calculates the RMSE of the predicted rating via *calcRMSE*($R$, $\hat{R}$). The output will then be simply the RMSE of the prediction. The role of $option$ was described in part B.
+
+### E- Calculating RMSE of the validation set for a given $\lambda$
+
+The function *regularizationErr*($\lambda$) wraps all the previous functions and performs the evaluation of the linear model for a given regularization factor. It takes $\lambda$ as input and use it in conjunction with the train set to build the corresponding linear model. It then engages the model to predict the ratings for the validation set, and evaluate the RMSE for the predicted value. The output would be a single RMSE value for any given $\lambda$.
+
+```{r, include = FALSE }
+
+# All the defined functions are presented here Please run this section to add the functions into the memory.
+
+buildLinearModel <- function(givenDataBase, lambda=0) {
+#   This function takes a dataset and a regularization factor, 
+#   lambda (with default value of zero) and build a linear model.
+#   It uses the regularization concept to reduce the over-fitting 
+#   of the model on the training set. The optimal value of lambda 
+#   is computed by considering the RMSE of the different models
+#   applied on the validation_set.
+   
+  
+  
+  # Calculate the average of all given ratings:
+  ratingAVG <- mean(givenDataBase$rating)
+  
+  # Calculate the movie bias of each movie and store it in a new data frame
+  # called movies_df:
+  movies_df <- givenDataBase %>% 
+    group_by(movieId) %>% 
+    dplyr::summarize( movieBias = sum(rating - ratingAVG)/(n() + lambda) )
+  
+  # Calculate the user bias of each user and store it in a new data frame
+  # called users_df:
+  users_df <- givenDataBase %>% 
+    left_join(movies_df, by='movieId') %>%
+    group_by(userId) %>%
+    dplyr::summarize( userBias = sum(rating - ratingAVG - movieBias)/
+                        (n() + lambda) )
+  
+  # Calculate the genre bias of each genre and store it in a new data frame
+  # called genres_df:
+  genres_df <- givenDataBase %>% 
+    left_join(movies_df, by='movieId') %>%
+    left_join(users_df, by='userId') %>%
+    group_by(genres) %>% 
+    dplyr::summarize(genreBias = 
+                       sum(rating - ratingAVG - movieBias - userBias) / 
+                (n() + lambda) )
+  
+  # Combine all the calculated data frames into a list and return it:
+  builtModel <- list(ratingAVG = ratingAVG, movies_df = movies_df, 
+                     users_df = users_df, genres_df = genres_df)
+  
+  return(builtModel)
+  
+}
+
+doPredictionWithModel <- function(givenDataBase, givenModel, option) {
+#   This function takes a pre-built model as well as a dataset, 
+#   and calculates the predicted rating for dataset based on the
+#   given linear model. 
+#   It limits the calculated ratings in range (0.5,5), as the 
+#   actual rating system does.
+#   The input model is compatible with the output format of 
+#   the 'buildLinearModel' function.
+  
+# The option indicates how much details are considered in the calculation:
+#    option =1: The rating avg only
+#    option =2: The rating avg + movies bias
+#    option =3: The rating avg + movies bias + users' bias
+#    option =4,5: The rating avg + movies bias + users' bias + genres bias
+#       hint! option 5 is used for considering regularization parameter.  
+
+  # Define the lower and upper limits of the calculated ratings:  
+  rateMin <- 0.5
+  rateMax <- 5
+  
+  # Unpacking the model into its components:
+  ratingAVG <- givenModel$ratingAVG
+  movies_df <- givenModel$movies_df
+  users_df <- givenModel$users_df
+  genres_df<- givenModel$genres_df
+  
+  # Considering options for calculation:
+  
+  movieBiascoeff <- 0
+  userBiascoeff <- 0
+  genreBiascoeff <- 0
+  
+  if (option > 1 ) movieBiascoeff <- 1
+  if (option > 2 ) userBiascoeff <- 1
+  if (option > 3 ) genreBiascoeff <- 1
+  
+  
+  # Calculate the predicted ratings:
+  predicted_ratings <- givenDataBase %>% 
+    left_join(movies_df, by='movieId') %>%
+    left_join(users_df, by='userId') %>%
+    left_join(genres_df, by = 'genres') %>%
+    mutate(pred = ratingAVG + 
+             movieBiascoeff*movieBias + 
+             userBiascoeff*userBias + 
+             genreBiascoeff*genreBias) %>%
+    mutate(pred = ifelse(pred < rateMin, rateMin, 
+                         ifelse(pred > rateMax, rateMax, pred))) %>%
+    pull(pred)
+  
+  return (predicted_ratings)
+}
+
+calcRMSE <- function(true_ratings, predicted_ratings){
+#   This function calculates the Root-mean-square error (RMSE) 
+#   for the calculated ratings vs. the true ratings.
+  
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+calcPredictionError <- function(givenDataBase, givenModel, option) {
+#   This function returns the RMSE for a given database 
+#   when its actual ratings are compared with those 
+#   predicted by the given model.
+
+  predicted <- doPredictionWithModel(givenDataBase, givenModel, option)
+  err <- calcRMSE(predicted, givenDataBase$rating)
+  
+  return(err)
+}
+
+regularizationErr <- function(lambda) {
+#   This function takes the regularization parameter (lambda) 
+#   and calculates the RMSE of predicting ratings for the 
+#   validation set on a model achieved by the train set if 
+#   the given lambda is considered.
+  
+  currentModel <- buildLinearModel(train_set, lambda = lambda)
+  err <- calcPredictionError(validation_set,currentModel, option=4)
+  return(err)
+}
+
+
+```
+
+# 5- Results and Discussions
+
+The results of the predicting linear model is presented in this section.
+
+```{r, include = FALSE}
+#-------------------------------------------------------------------------------
+### Part #4: Obtain the recommendation system based on the linear model.
+
+# For options #1 to #4, the results are computed by assuming lambda=0.
+
+#   The following steps will be performed for option #5:
+
+#   1- Find the optimized value for regularization parameter (lambda)
+#       1-1- Guess a lambda
+#       1-2- Build a model by the train set and lambda
+#       1-3- Calculate the RMSE of the validation set by the resulted model
+#       1-4- Modify the value of lambda and go back to step 1-2 until reaching 
+#            a satisfactory result.
+
+#   2- Build a model based on the optimized lambda and edx database 
+#   3- Calculate the predicted ratings of the final_holdout_test based on the 
+#      resulted model in step 2
+
+#    4- Report the RMSE of the predicted ratings compared to the true ratings
+#-------------------------------------------------------------------------------
+
+# Build the linear model without regularization:
+model_NoRegul <- buildLinearModel(edx, lambda=0)
+#-------------------------------------------------------------------------------
+
+# Option #1: considering average of ratings only -------------------------------
+
+# on edx dataset:
+predicted_edx_option1 <- doPredictionWithModel(edx, model_NoRegul, option=1)
+err_edx_option1 <- calcRMSE(edx$rating, predicted_edx_option1)
+
+#on final_holdout_test:
+predicted_test_option1 <- doPredictionWithModel(final_holdout_test, 
+                                                model_NoRegul, option=1)
+
+err_test_option1 <- calcRMSE(final_holdout_test$rating, predicted_test_option1)
+#-------------------------------------------------------------------------------
+
+# Option #2: considering average of ratings and bias of (movies)----------------
+
+# on edx dataset:
+predicted_edx_option2 <- doPredictionWithModel(edx, model_NoRegul, option=2)
+err_edx_option2 <- calcRMSE(edx$rating, predicted_edx_option2)
+
+#on final_holdout_test:
+predicted_test_option2 <- doPredictionWithModel(final_holdout_test, 
+                                                model_NoRegul, option=2)
+
+err_test_option2 <- calcRMSE(final_holdout_test$rating, predicted_test_option2)
+#-------------------------------------------------------------------------------
+
+# Option #3: considering average of ratings and bias of (movies, users)---------
+
+# on edx dataset:
+predicted_edx_option3 <- doPredictionWithModel(edx, model_NoRegul, option=3)
+err_edx_option3 <- calcRMSE(edx$rating, predicted_edx_option3)
+
+#on final_holdout_test:
+predicted_test_option3 <- doPredictionWithModel(final_holdout_test, 
+                                                model_NoRegul, option=3)
+
+err_test_option3 <- calcRMSE(final_holdout_test$rating, predicted_test_option3)
+#-------------------------------------------------------------------------------
+
+# Option #4: considering average of ratings and bias of (movies, users, genres)-
+
+# on edx dataset:
+predicted_edx_option4 <- doPredictionWithModel(edx, model_NoRegul, option=4)
+err_edx_option4 <- calcRMSE(edx$rating, predicted_edx_option4)
+
+#on final_holdout_test:
+predicted_test_option4 <- doPredictionWithModel(final_holdout_test, 
+                                                model_NoRegul, option=4)
+
+err_test_option4 <- calcRMSE(final_holdout_test$rating, predicted_test_option4)
+#-------------------------------------------------------------------------------
+
+# Option #5 (Final Model): considering option #4 with regularization------------
+
+# The lambda is investigated over the range of (0, 10):
+lambdaRange <- c(0, 10)
+
+# Find the optimized lambda that minimizes the 'regularizationErr' function:
+bestRegularization <- optimize(regularizationErr, lambdaRange)
+
+# Extract the optimized lambda:
+lambda_opt <- unlist(bestRegularization["minimum"])
+print(lambda_opt)   # lambda_opt = 4.10247 
+
+# Build the predicting model by edx dataset and the optimized lambda:
+finalModel <- buildLinearModel(edx, lambda = lambda_opt)
+
+# on edx dataset:
+predicted_edx_option5 <- doPredictionWithModel(edx, finalModel, option=5)
+err_edx_option5 <- calcRMSE(edx$rating, predicted_edx_option5)
+
+#on final_holdout_test:
+predicted_test_option5 <- doPredictionWithModel(final_holdout_test, 
+                                                finalModel, option=5)
+
+err_test_option5 <- calcRMSE(final_holdout_test$rating, predicted_test_option5)
+
+
+
+# Calculate quantiles for 'edx' and 'final holdout test' datasets:
+portions <- seq(0,1,0.005)
+
+# edx dataset
+quantile_edx_actual <- quantile(edx$rating,portions)
+quantile_edx_option1 <- quantile(predicted_edx_option1,portions)
+quantile_edx_option2 <- quantile(predicted_edx_option2,portions)
+quantile_edx_option3 <- quantile(predicted_edx_option3,portions)
+quantile_edx_option4 <- quantile(predicted_edx_option4,portions)
+quantile_edx_option5 <- quantile(predicted_edx_option5,portions)
+
+# final holdout test
+quantile_test_actual <- quantile(final_holdout_test$rating,portions)
+quantile_test_option1 <- quantile(predicted_test_option1,portions)
+quantile_test_option2 <- quantile(predicted_test_option2,portions)
+quantile_test_option3 <- quantile(predicted_test_option3,portions)
+quantile_test_option4 <- quantile(predicted_test_option4,portions)
+quantile_test_option5 <- quantile(predicted_test_option5,portions)
+```
+
+Table below indicates the details of the results of linear model for both 'edx' and the final hold out test (test_set) datasets. According to the given results, the RMSE of the final model for the test set is 0.86434, which is achieved by a regularization factor of $\lambda=4.10247$. 
+
+```{r resultsOfModel, echo = FALSE, result='asis'}
+
+options <- c(1,2,3,4,5)
+optionDescriptions <- c("$\\mu$", 
+                        "$\\mu$, $B_i$",
+                        "$\\mu$, $B_i$, $B_m$",
+                        "$\\mu$, $B_i$, $B_m$, $B_g$",
+                        "$\\mu$, $B_i$, $B_m$, $B_g$, $\\lambda$")
+
+rsme_edx <- c(err_edx_option1, err_edx_option2, err_edx_option3,
+              err_edx_option4, err_edx_option5)
+
+rsme_test <- c(err_test_option1, err_test_option2, err_test_option3,
+              err_test_option4, err_test_option5)
+
+
+
+
+dataframeResults <- data.frame(options, optionDescriptions,
+                               rsme_edx, rsme_test)
+
+colnames(dataframeResults) <- c("Options", "Description", 
+                                 "RMSE of 'edx'", "RMSE of 'Final Hold Out' set'")
+
+knitr::kable(dataframeResults, caption = "Results of Linear Model")
+```
+
+Figure below depict the quantiles of actual and predicted ratings for 'edx' and 'Final Hold out Test' sets, respectively. Different options of model prediction are also considered. One can see that the corresponding curves of both datasets almost have the same trend. In addition, the results of options #3 to #5 are almost the same.
+
+```{r figQuantiles, echo=FALSE}
+graphTitle_edx <- "Predicted Ratings vs. Actual Rating for 'edx' Dataset"
+
+plot(portions, quantile_edx_actual, type="o", col="black", 
+     pch="o", lty=1, ylim=c(0,5), xlab="Portion", ylab="Rating" )
+lines(portions, quantile_edx_option1, col="black",lty=2, lwd=2)
+lines(portions, quantile_edx_option2, col="brown",lty=2, lwd=2)
+lines(portions, quantile_edx_option3, col="green",lty=2, lwd=10)
+lines(portions, quantile_edx_option4, col="red",lty=2, lwd=5)
+lines(portions, quantile_edx_option5, col="blue",lty=2, lwd=2)
+
+legend(0.5,3.,legend=c("Actual","Option #1","Option #2", "Option #3", 
+                      "Option #4", "Option #5"), 
+       col=c("black", "black", "brown", "green","red", "blue"),
+       pch=c("o","","","","",""),
+       lty=c(1,2,3,4,5,6), ncol=1, lwd=c(1,2,2,10,5,2))
+
+title(graphTitle_edx)
+
+
+
+graphTitle_test <- "Predicted Ratings vs. Actual Rating for 'final hold out test'"
+
+plot(portions, quantile_test_actual, type="o", col="black", 
+     pch="o", lty=1, ylim=c(0,5),  xlab="Portion", ylab="Rating")
+lines(portions, quantile_test_option1, col="black",lty=2, lwd=2)
+lines(portions, quantile_test_option2, col="brown",lty=2, lwd=2)
+lines(portions, quantile_test_option3, col="green",lty=2, lwd=10)
+lines(portions, quantile_test_option4, col="red",lty=2, lwd=5)
+lines(portions, quantile_test_option5, col="blue",lty=2, lwd=2)
+
+legend(0.5,3,legend=c("Actual","Option #1","Option #2", "Option #3", 
+                      "Option #4", "Option #5"), 
+       col=c("black", "black", "brown", "green","red", "blue"),
+       pch=c("o","","","","",""),
+       lty=c(1,2,3,4,5,6), ncol=1, lwd=c(1,2,2,10,5,2))
+
+title(graphTitle_test)
+
+```
+
+# 6- Conclusion
+
+The movie recommendation system was developed based on the linear model estimation for MovieLens database, which contains the information of about 10M ($10^7$) ratings. Each row of the database includes the movie title and ID, user's ID, the given rating, the time that the rating has been given (in time-stamp format), and the corresponding genres of the movie. The database was originally split into two separate parts, one for building the predicting model ('edx') and another one for evaluating the final model on (i.e., test set: final hold out set), by the ratio of 90% and 10%, respectively. The 'edx' dataset was consequently divided into train (90%) and validation (10%) sets, where the former was used to build the linear model while the latter was engaged to fine-tune the hyper-parameter (i.e., $\lambda$, the regularization parameter). 
+the 'edx' dataset contains the information of more than 10,000 movies which were revived by almost 70,000 unique individuals. The ratings were discrete numbers from 0.5 to 5 (with intervals of 0.5). There are 19 separate basic genres introduced for the movies that generate about 800 different combination of genres in the database. The linear model considered the average of ratings, in conjunction with the bias assumption for movies, users, and genres. The regularization factor was also taken into account to prevent the over-fitting issue. In order to illustrate the importance of multiple terms in the linear model, the results were calculated for different levels of details and both 'edx' and 'final hold out test' sets. For the test set, the best results was achieved for option #5, which included modeling of all parameters with regularization. The optimum value of the regularization factor was calculated as $\lambda=4.10247$, which resulted in the RMSE of 0.86434 for test set. 
+There are some limitations in the presented model that can be improved in the future works, including neglecting the standard deviations of movies and users, which are important factors in the modeling. In addition, the normalization of the raw database would help to develop a better linear model. Moreover, the users' tendency toward genres is a main factor that was neglected in the current report. It can be added up to the other parameter to develop a more accurate model with interpretable factors. finally, the regularization (which was limited to one parameter here) can be performed with multiple parameters, that probably result in a better prediction.
+
+
+# 7- References
+
+[1] https://grouplens.org/datasets/movielens/
+[2] Kotkov et al., 2021] Kotkov, D., Maslov, A., and Neovius, M. (2021). Revisiting the tag relevance prediction problem. In Proceedings of the 44th International ACM SIGIR conference on Research and Development in Information Retrieval. https://doi.org/10.1145/3404835.3463019
+[3] Vig et al., 2012] Vig, J., Sen, S., and Riedl, J. (2012). The tag genome: Encoding community knowledge to support novel interaction. ACM Trans. Interact. Intell. Syst., 2(3):13:1–13:44. https://doi.org/10.1145/2362394.2362395
+[4] https://rafalab.github.io/dsbook/
+[5] https://statisticsbyjim.com/regression/interpret-constant-y-intercept-regression/
